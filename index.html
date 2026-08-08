@@ -224,7 +224,8 @@
 <div id="loginScreen">
   <div class="login-card">
     <div class="brand">CA<span>Settle</span></div>
-    <p>Masukkan PIN untuk masuk</p>
+    <p>Masukkan nama &amp; PIN untuk masuk</p>
+    <input type="text" id="nameInput" placeholder="Nama kamu" maxlength="60" autocomplete="off">
     <input type="password" id="pinInput" placeholder="••••••" maxlength="20" autocomplete="off" inputmode="text">
     <button class="btn-primary" id="btnLogin" style="width:100%;">Masuk</button>
     <div class="login-error" id="loginError"></div>
@@ -354,13 +355,18 @@
 <script>
 /* ================= CONFIG ================= */
 const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzvGODLQCSkhTCdZONDBpweDHuuDEsEXVaaSHqsSEw8C5dcRG6TfWH3desMHKWSMLoarA/exec';
-const ROLE_PINS = { admin: 'ism2026', pm: 'pmism2026' }; // TODO: ganti sebelum dipakai beneran
+// PIN TIDAK LAGI disimpan di sini — validasi PIN sekarang dilakukan di server (Code.gs)
+// lewat action 'whoami'. Lihat Script Properties PIN_ADMIN / PIN_PM di backend.
 const KATEGORI_LIST = ["Transportasi","Makan & Minum","Akomodasi","Komunikasi","Perlengkapan / ATK","Lainnya"];
+const SESSION_KEY = 'caSettleSession';
 
 /* ================= STATE ================= */
 let currentRole = null; // 'admin' | 'pm'
+let currentPin = null;  // dikirim ke server di tiap request agar server bisa validasi ulang
+let currentUser = '';   // nama pengisi, buat jejak audit di sheet
 let caInfo = { nomor:'', nama:'', dept:'', jumlah:0, status:'Draft' };
 let caSaved = false;
+let caInfoDirty = false;
 let entries = [];
 let pendingQueue = [];
 let currentReview = null;
@@ -378,14 +384,37 @@ function showToast(msg, isErr){
   clearTimeout(t._timer);
   t._timer = setTimeout(()=>t.classList.remove('show'), 2600);
 }
-function driveThumbUrl(fileId){ return 'https://drive.google.com/uc?export=view&id=' + fileId; }
+// pola /thumbnail (bukan /uc?export=view yang lama & sering diblok Google untuk hotlink)
+function driveThumbUrl(fileId){ return 'https://drive.google.com/thumbnail?id=' + fileId + '&sz=w600'; }
+
+function friendlyError(err){
+  const msg = String((err && err.message) || err || '');
+  if(/Failed to fetch|NetworkError|network|Load failed/i.test(msg)) return 'Tidak bisa terhubung ke server — cek koneksi internet kamu.';
+  if(/Batas OCR harian/i.test(msg)) return msg;
+  if(/tidak diizinkan|PIN salah|PIN tidak/i.test(msg)) return msg;
+  if(/Server error/i.test(msg)) return 'Server sedang bermasalah, coba lagi sebentar lagi.';
+  return msg || 'Terjadi kesalahan, coba lagi.';
+}
+
+/* ================= SESSION (biar refresh nggak logout paksa) ================= */
+function saveSession(role, pin, name){
+  try{ sessionStorage.setItem(SESSION_KEY, JSON.stringify({ role, pin, name })); }catch(e){}
+}
+function loadSession(){
+  try{ return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); }catch(e){ return null; }
+}
+function clearSession(){
+  try{ sessionStorage.removeItem(SESSION_KEY); }catch(e){}
+}
 
 /* ================= BACKEND CALL ================= */
 async function callBackend(action, data){
+  const payload = Object.assign({}, data || {});
+  if(currentPin) payload.pin = currentPin; // server yang validasi ulang tiap panggilan, bukan cuma di layar login
   const res = await fetch(WEB_APP_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // hindari CORS preflight di Apps Script
-    body: JSON.stringify({ action, data: data || {} })
+    body: JSON.stringify({ action, data: payload })
   });
   if(!res.ok) throw new Error('Server error (' + res.status + ')');
   const json = await res.json();
@@ -420,11 +449,29 @@ function compressImage(file, maxDim, quality){
 }
 
 /* ================= LOGIN ================= */
-function doLogin(){
+// PIN divalidasi di server (action 'whoami') — client tidak lagi tahu/menyimpan PIN yang benar.
+async function doLogin(){
+  const errEl = document.getElementById('loginError');
+  errEl.textContent = '';
+  const name = document.getElementById('nameInput').value.trim();
   const pin = document.getElementById('pinInput').value.trim();
-  if(pin === ROLE_PINS.admin) return enterApp('admin');
-  if(pin === ROLE_PINS.pm) return enterApp('pm');
-  document.getElementById('loginError').textContent = 'PIN salah, coba lagi.';
+  if(!name){ errEl.textContent = 'Isi nama kamu dulu.'; return; }
+  if(!pin){ errEl.textContent = 'Isi PIN.'; return; }
+
+  const btn = document.getElementById('btnLogin');
+  btn.disabled = true; const origLabel = btn.textContent; btn.textContent = 'Memeriksa...';
+  currentPin = pin; // sementara, dipakai callBackend buat cek ke server
+  try{
+    const res = await callBackend('whoami', {});
+    currentUser = name;
+    saveSession(res.role, pin, name);
+    enterApp(res.role);
+  }catch(err){
+    currentPin = null;
+    errEl.textContent = 'PIN salah, coba lagi.';
+  }finally{
+    btn.disabled = false; btn.textContent = origLabel;
+  }
 }
 function enterApp(role){
   currentRole = role;
@@ -432,7 +479,7 @@ function enterApp(role){
   document.getElementById('app').style.display = 'block';
 
   const pill = document.getElementById('rolePill');
-  pill.textContent = role === 'pm' ? 'PM · View Only' : 'Admin';
+  pill.textContent = (role === 'pm' ? 'PM · View Only' : 'Admin') + (currentUser ? ' · ' + currentUser : '');
   pill.classList.toggle('pm', role === 'pm');
 
   const nav = document.getElementById('navTabs');
@@ -447,14 +494,36 @@ function enterApp(role){
   nav.querySelectorAll('.tab-btn').forEach(btn=>btn.addEventListener('click', ()=>switchTab(btn.dataset.tab)));
 }
 document.getElementById('btnLogin').addEventListener('click', doLogin);
+document.getElementById('nameInput').addEventListener('keydown', (e)=>{ if(e.key==='Enter') document.getElementById('pinInput').focus(); });
 document.getElementById('pinInput').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doLogin(); });
 document.getElementById('btnLogout').addEventListener('click', ()=>{
-  currentRole = null; caInfo = { nomor:'', nama:'', dept:'', jumlah:0, status:'Draft' };
-  caSaved = false; entries = [];
+  currentRole = null; currentPin = null; currentUser = '';
+  caInfo = { nomor:'', nama:'', dept:'', jumlah:0, status:'Draft' };
+  caSaved = false; caInfoDirty = false; entries = [];
+  clearSession();
+  document.getElementById('nameInput').value = '';
   document.getElementById('pinInput').value = '';
   document.getElementById('loginError').textContent = '';
   document.getElementById('app').style.display = 'none';
   document.getElementById('loginScreen').style.display = 'flex';
+});
+
+// Pulihkan sesi kalau tab di-refresh (sessionStorage otomatis hilang saat tab ditutup)
+(function tryRestoreSession(){
+  const s = loadSession();
+  if(s && s.role && s.pin){
+    currentPin = s.pin;
+    currentUser = s.name || '';
+    enterApp(s.role);
+  }
+})();
+
+// Peringatkan sebelum keluar/refresh kalau masih ada antrian struk yang belum tersimpan
+window.addEventListener('beforeunload', (e)=>{
+  if(pendingQueue.length > 0 || currentReview){
+    e.preventDefault();
+    e.returnValue = '';
+  }
 });
 
 /* ================= TABS ================= */
@@ -476,8 +545,13 @@ function syncCaInfoFromForm(){
   caInfo.dept = document.getElementById('caDept').value;
   caInfo.jumlah = Number(document.getElementById('caJumlah').value) || 0;
   caInfo.status = document.getElementById('caStatus').value;
+  if(caSaved){ caInfoDirty = true; renderCaSaveStatus(); }
   updateLedger();
   updateUploadLock();
+}
+function renderCaSaveStatus(){
+  const statusEl = document.getElementById('caSaveStatus');
+  if(caInfoDirty){ statusEl.textContent = '● Ada perubahan belum disimpan'; statusEl.classList.remove('ok'); }
 }
 function fillCaInfoForm(){
   document.getElementById('caNomor').value = caInfo.nomor || '';
@@ -495,39 +569,55 @@ function updateUploadLock(){
 document.getElementById('btnSaveCaInfo').addEventListener('click', async ()=>{
   syncCaInfoFromForm();
   if(!caInfo.nomor){ showToast('Nomor CA wajib diisi', true); return; }
+  const btn = document.getElementById('btnSaveCaInfo');
   const statusEl = document.getElementById('caSaveStatus');
+  if(btn.disabled) return; // cegah klik dobel -> submit dobel
+  btn.disabled = true;
   statusEl.textContent = 'Menyimpan...'; statusEl.classList.remove('ok');
   try{
-    await callBackend('saveCaInfo', { nomor: caInfo.nomor, nama: caInfo.nama, dept: caInfo.dept, jumlah: caInfo.jumlah, status: caInfo.status });
+    const res = await callBackend('saveCaInfo', { nomor: caInfo.nomor, nama: caInfo.nama, dept: caInfo.dept, jumlah: caInfo.jumlah, status: caInfo.status, diinputOleh: currentUser });
+    caInfo.nomor = res.nomor || caInfo.nomor; // pakai nomor kanonik dari server (huruf besar/kecil & spasi sudah dirapikan)
+    document.getElementById('caNomor').value = caInfo.nomor;
     caSaved = true;
+    caInfoDirty = false;
     statusEl.textContent = '✓ Tersimpan ke Google Sheets'; statusEl.classList.add('ok');
     updateUploadLock();
     showToast('Info CA tersimpan');
   }catch(err){
-    statusEl.textContent = ''; 
-    showToast('Gagal menyimpan: ' + err.message, true);
+    statusEl.textContent = '';
+    showToast('Gagal menyimpan: ' + friendlyError(err), true);
+  }finally{
+    btn.disabled = false;
   }
 });
 
 document.getElementById('btnLoadCa').addEventListener('click', async ()=>{
   const nomor = document.getElementById('loadNomorCa').value.trim();
   if(!nomor){ showToast('Isi Nomor CA yang mau dibuka', true); return; }
+  const btn = document.getElementById('btnLoadCa');
+  if(btn.disabled) return;
+  btn.disabled = true;
   try{
     const data = await callBackend('getCaData', { nomorCa: nomor });
     caInfo = { nomor: data.header.nomor, nama: data.header.nama, dept: data.header.dept, jumlah: Number(data.header.jumlah)||0, status: data.header.status || 'Draft' };
     caSaved = true;
+    caInfoDirty = false;
     entries = data.details.map(d => ({
       id: d.idStruk, thumb: driveThumbUrl(d.driveFileId), total: Number(d.total)||0,
       merchant: d.merchant, tanggal: d.tanggal, kategori: d.kategori, keterangan: d.keterangan,
       confidence: d.confidence, driveStatus: 'saved', driveFileUrl: d.driveFileUrl
     }));
     fillCaInfoForm();
+    document.getElementById('caSaveStatus').textContent = '✓ Tersimpan ke Google Sheets';
+    document.getElementById('caSaveStatus').classList.add('ok');
     updateLedger();
     updateUploadLock();
     renderEntriesList();
     showToast('Data CA ' + nomor + ' dimuat');
   }catch(err){
-    showToast('Gagal memuat: ' + err.message, true);
+    showToast('Gagal memuat: ' + friendlyError(err), true);
+  }finally{
+    btn.disabled = false;
   }
 });
 
@@ -569,7 +659,7 @@ async function processNextInQueue(){
       const dataUrl2 = await compressImage(file);
       renderReviewCard({ total:null, merchant:null, tanggal:null, kategori_suggest:'Lainnya', confidence:'manual' }, dataUrl2);
     }catch(e2){ /* file benar-benar gagal dibaca, skip */ }
-    showToast('OCR gagal (' + err.message + ') — isi manual', true);
+    showToast('OCR gagal (' + friendlyError(err) + ') — isi manual', true);
   }
 }
 
@@ -634,18 +724,22 @@ async function uploadEntryToBackend(entry){
   entry.driveStatus = 'uploading';
   renderEntriesList();
   try{
+    // entry.thumb masih data URL base64 sampai upload sukses (lihat di bawah)
     const base64 = entry.thumb.split(',')[1];
     const res = await callBackend('uploadStruk', {
       nomorCa: caInfo.nomor, idStruk: entry.id, tanggal: entry.tanggal, merchant: entry.merchant,
       kategori: entry.kategori, keterangan: entry.keterangan, total: entry.total, confidence: entry.confidence,
-      fileName: entry.id + '.jpg', mimeType: 'image/jpeg', base64
+      fileName: entry.id + '.jpg', mimeType: 'image/jpeg', base64, diinputOleh: currentUser
     });
     entry.driveStatus = 'saved';
     entry.driveFileUrl = res.driveFileUrl;
+    // ganti data URL base64 (berat di memori) dengan link thumbnail Drive begitu sudah tersimpan,
+    // supaya sesi dengan banyak struk nggak numpuk base64 di RAM browser
+    entry.thumb = driveThumbUrl(res.driveFileId);
     showToast('Struk tersimpan ke Drive & Sheets');
   }catch(err){
     entry.driveStatus = 'failed';
-    showToast('Gagal simpan ke server: ' + err.message, true);
+    showToast('Gagal simpan ke server: ' + friendlyError(err), true);
   }
   renderEntriesList();
 }
@@ -716,7 +810,7 @@ async function updateEntryField(id, field, value){
   updateLedger();
   try{
     await callBackend('updateStruk', { idStruk: id, tanggal: entry.tanggal, merchant: entry.merchant, kategori: entry.kategori, keterangan: entry.keterangan, total: entry.total });
-  }catch(err){ showToast('Gagal update ke server: ' + err.message, true); }
+  }catch(err){ showToast('Gagal update ke server: ' + friendlyError(err), true); }
 }
 
 async function deleteEntry(id){
@@ -728,7 +822,7 @@ async function deleteEntry(id){
     updateLedger();
     showToast('Struk dihapus');
   }catch(err){
-    showToast('Gagal hapus: ' + err.message, true);
+    showToast('Gagal hapus: ' + friendlyError(err), true);
   }
 }
 
@@ -757,7 +851,7 @@ async function loadAllCa(){
       </div>`;
     }).join('');
   }catch(err){
-    wrap.innerHTML = `<div class="empty-state">Gagal memuat data: ${escapeHtml(err.message)}</div>`;
+    wrap.innerHTML = `<div class="empty-state">Gagal memuat data: ${escapeHtml(friendlyError(err))}</div>`;
   }
 }
 
@@ -773,7 +867,7 @@ async function openCaFromPm(nomor){
     reportReturnTab = 'dashboard';
     switchTab('report');
   }catch(err){
-    showToast('Gagal membuka CA: ' + err.message, true);
+    showToast('Gagal membuka CA: ' + friendlyError(err), true);
   }
 }
 

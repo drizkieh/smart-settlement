@@ -6,6 +6,7 @@
 <title>CA Settle — Settlement Cash Advance</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
 <style>
   :root{
     --bg:#12151c; --panel:#1a1f29; --panel-2:#212836; --border:#2a3140;
@@ -200,6 +201,7 @@
   @media(max-width:600px){.lampiran-grid{grid-template-columns:repeat(2,1fr);}}
   .lampiran-item{border:1px solid var(--border);border-radius:8px;padding:6px;text-align:center;overflow:hidden;background:#fff;}
   .lampiran-item img{width:100%;height:150px;object-fit:contain;background:#fff;padding:2px;border-radius:5px;margin-bottom:6px;display:block;}
+  @media screen and (max-width:600px){ .lampiran-item img{height:170px;} }
   .lampiran-item .lnum{font-size:10px;color:var(--text-muted);font-weight:700;}
   .lampiran-item .ltotal{font-family:var(--font-mono);font-size:11px;font-weight:600;}
 
@@ -222,6 +224,19 @@
   .zoom-toolbar .scale-label{font-family:var(--font-mono);font-size:12px;color:var(--text-muted);min-width:44px;text-align:center;}
   .zoom-close{position:absolute;top:16px;right:16px;z-index:3;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:999px;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:18px;}
 
+  /* ---------- Crop modal ---------- */
+  #cropModal{position:fixed;inset:0;z-index:310;display:none;align-items:center;justify-content:center;padding:16px;}
+  #cropModal.open{display:flex;}
+  .crop-backdrop{position:absolute;inset:0;background:rgba(8,10,14,0.88);backdrop-filter:blur(6px);}
+  .crop-panel{position:relative;z-index:1;background:var(--panel);border:1px solid var(--border);border-radius:12px;width:100%;max-width:720px;max-height:92vh;display:flex;flex-direction:column;overflow:hidden;}
+  .crop-head{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  .crop-head h3{font-family:var(--font-display);font-size:14px;font-weight:700;}
+  .crop-stage{flex:1;min-height:260px;max-height:62vh;overflow:hidden;background:#0b0e13;display:flex;align-items:center;justify-content:center;padding:10px;}
+  .crop-stage img{max-width:100%;display:block;}
+  .crop-actions{display:flex;gap:8px;flex-wrap:wrap;padding:12px 16px;border-top:1px solid var(--border);justify-content:space-between;align-items:center;}
+  .crop-actions .left{display:flex;gap:8px;flex-wrap:wrap;}
+  .crop-actions .right{display:flex;gap:8px;flex-wrap:wrap;}
+
   @media print{
     html, body{height:auto !important;overflow:visible !important;background:#fff !important;color:#000 !important;padding:0 !important;}
     .no-print, #imgZoomModal, #toast{display:none !important;}
@@ -234,8 +249,9 @@
     .ledger-item .value, .entry-total, table.report-table td.num{color:#000 !important;}
     table.report-table th{color:#555 !important;}
     .lampiran-item{break-inside:avoid;break-inside:avoid-column;page-break-inside:avoid;}
-    .lampiran-grid{grid-template-columns:repeat(3,1fr) !important;gap:10px !important;}
-    .lampiran-item img{height:165px !important;object-fit:contain !important;background:#fff !important;}
+    .lampiran-grid{grid-template-columns:repeat(2,1fr) !important;gap:12px !important;}
+    .lampiran-item img{height:245px !important;object-fit:contain !important;background:#fff !important;padding:4px !important;}
+    .lampiran-item:nth-child(4n){break-after:page;page-break-after:always;}
     tr{break-inside:avoid;}
     .table-scroll{overflow:visible;}
     @page{margin:12mm;}
@@ -394,7 +410,30 @@
   </div>
 </div>
 
+<div id="cropModal" aria-hidden="true">
+  <div class="crop-backdrop" id="cropBackdrop"></div>
+  <div class="crop-panel">
+    <div class="crop-head">
+      <h3>✂️ Crop Struk — buang batas mubazir</h3>
+      <button class="btn-secondary btn-small" id="btnCropClose">✕</button>
+    </div>
+    <div class="crop-stage"><img id="cropImg" alt="Crop struk"></div>
+    <div class="crop-actions">
+      <div class="left">
+        <button class="btn-secondary btn-small" id="btnCropRotateLeft" title="Putar kiri">↺</button>
+        <button class="btn-secondary btn-small" id="btnCropRotateRight" title="Putar kanan">↻</button>
+        <button class="btn-secondary btn-small" id="btnCropReset" title="Reset crop">Reset</button>
+      </div>
+      <div class="right">
+        <button class="btn-secondary" id="btnCropCancel">Batal</button>
+        <button class="btn-primary" id="btnCropApply">Terapkan Crop</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
 
 <script>
 /* ================= CONFIG ================= */
@@ -845,12 +884,14 @@ function renderReviewCard(ocr, imageDataUrl){
         <div class="field"><label>Keterangan (opsional)</label><textarea id="rvKeterangan" rows="2" placeholder="Catatan tambahan..."></textarea></div>
       </div>
       <div class="review-actions">
+        <button class="btn-secondary" id="btnCropReview">✂️ Crop</button>
         <button class="btn-primary" id="btnSaveReview">Simpan ke Daftar</button>
         <button class="btn-danger-text" id="btnDiscardReview">Buang Struk Ini</button>
       </div>
     </div>`;
 
   document.getElementById('rvTotal').addEventListener('input', (e)=>{ document.getElementById('totalWrap').classList.toggle('empty', !e.target.value); });
+  document.getElementById('btnCropReview').addEventListener('click', ()=> openCropModal(currentReview.thumb, 'review'));
   document.getElementById('btnSaveReview').addEventListener('click', saveReviewEntry);
   document.getElementById('btnDiscardReview').addEventListener('click', discardReview);
 }
@@ -1252,6 +1293,83 @@ function closeLampiranZoom_(){
   });
   // double click reset
   img.addEventListener('dblclick', ()=> { zoomScale = zoomScale === 1 ? 1.8 : 1; zoomTx = 0; zoomTy = 0; applyZoomTransform_(); });
+})();
+
+// ---------- Crop (Cropper.js) ----------
+let cropper = null;
+let cropTarget = null; // 'review' | entryId
+function openCropModal(src, target){
+  cropTarget = target;
+  const modal = document.getElementById('cropModal');
+  const cimg = document.getElementById('cropImg');
+  if(!modal || !cimg || !src) return;
+  cimg.src = src;
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden','false');
+  document.body.style.overflow='hidden';
+  if(cropper){ try{ cropper.destroy(); }catch(_){} cropper=null; }
+  cimg.onload = ()=>{
+    if(cropper) try{ cropper.destroy(); }catch(_){}
+    // @ts-ignore Cropper global
+    cropper = new Cropper(cimg, {
+      viewMode:1, autoCropArea:0.92, movable:true, zoomable:true, rotatable:true, scalable:true,
+      background:false, responsive:true, checkOrientation:true
+    });
+  };
+  // jika sudah complete
+  if(cimg.complete) cimg.onload();
+}
+function closeCropModal_(){
+  const modal = document.getElementById('cropModal');
+  if(modal){ modal.classList.remove('open'); modal.setAttribute('aria-hidden','true'); }
+  document.body.style.overflow='';
+  if(cropper){ try{ cropper.destroy(); }catch(_){} cropper=null; }
+  cropTarget=null;
+}
+(function initCrop_(){
+  const modal=document.getElementById('cropModal'), backdrop=document.getElementById('cropBackdrop');
+  const btnClose=document.getElementById('btnCropClose'), btnCancel=document.getElementById('btnCropCancel');
+  const btnApply=document.getElementById('btnCropApply'), btnReset=document.getElementById('btnCropReset');
+  const btnRL=document.getElementById('btnCropRotateLeft'), btnRR=document.getElementById('btnCropRotateRight');
+  if(backdrop) backdrop.addEventListener('click', closeCropModal_);
+  if(btnClose) btnClose.addEventListener('click', closeCropModal_);
+  if(btnCancel) btnCancel.addEventListener('click', closeCropModal_);
+  if(btnReset) btnReset.addEventListener('click', ()=>{ if(cropper) cropper.reset(); });
+  if(btnRL) btnRL.addEventListener('click', ()=>{ if(cropper) cropper.rotate(-90); });
+  if(btnRR) btnRR.addEventListener('click', ()=>{ if(cropper) cropper.rotate(90); });
+  if(btnApply) btnApply.addEventListener('click', async ()=>{
+    if(!cropper) return;
+    try{
+      const canvas = cropper.getCroppedCanvas({ maxWidth:1600, maxHeight:1600, imageSmoothingEnabled:true, imageSmoothingQuality:'high' });
+      if(!canvas) throw new Error('Gagal crop');
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+      if(cropTarget === 'review' && currentReview){
+        currentReview.thumb = dataUrl;
+        closeCropModal_();
+        // re-render review dengan thumb baru + opsi re-OCR
+        const oldTotal = currentReview.total;
+        document.getElementById('reviewArea').querySelector('.review-img').src = dataUrl;
+        if(confirm('Crop diterapkan. Jalankan ulang OCR AI untuk hasil baru?')){
+          document.getElementById('queueArea').innerHTML = '<div class="processing-row"><div class="spinner"></div>Membaca ulang struk crop...</div>';
+          try{
+            const base64 = dataUrl.split(',')[1];
+            const ocr = await callBackend('ocrStruk', { base64, mimeType:'image/jpeg' });
+            currentReview.total = ocr.total;
+            currentReview.merchant = ocr.merchant || currentReview.merchant;
+            currentReview.tanggal = ocr.tanggal || currentReview.tanggal;
+            currentReview.kategori = KATEGORI_LIST.includes(ocr.kategori_suggest) ? ocr.kategori_suggest : currentReview.kategori;
+            currentReview.confidence = ocr.total ? (ocr.confidence||'high') : 'manual';
+            renderReviewCard(ocr, dataUrl);
+            // pertahankan keterangan jika sudah diisi
+          }catch(e){ showToast('Re-OCR gagal: '+friendlyError(e), true); }
+          document.getElementById('queueArea').innerHTML='';
+        } else {
+          showToast('Crop diterapkan');
+        }
+      }
+    }catch(e){ showToast('Gagal crop: '+ (e.message||e), true); }
+  });
+  document.addEventListener('keydown', (e)=>{ const m=document.getElementById('cropModal'); if(m && m.classList.contains('open') && e.key==='Escape') closeCropModal_(); });
 })();
 
 // Print handler: hydrate dulu baru print agar gambar tidak broken

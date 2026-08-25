@@ -43,12 +43,11 @@
  *  7. Setiap kali edit Code.gs, WAJIB Deploy > Manage deployments > Edit (pensil)
  *     > New version, kalau nggak URL lama tetap jalanin kode versi lama
  *
- *  CATATAN OCR: OCR sekarang pakai Google Drive OCR (GRATIS, bawaan akun
- *  Google), bukan lagi Anthropic API — jadi ANTHROPIC_API_KEY sudah TIDAK
- *  dipakai lagi dan boleh dihapus dari Script Properties kalau masih ada.
- *  Akurasinya lumayan untuk struk yang jelas, tapi untuk struk thermal yang
- *  buram/kusut kemungkinan confidence-nya "medium/low" dan perlu dikoreksi
- *  manual di layar review — ini trade-off wajar untuk versi gratis.
+ *  CATATAN OCR: Hybrid — coba Google AI (Gemini) dulu kalau ada
+ *  GEMINI_API_KEY di Script Properties, fallback ke Google Drive OCR gratis
+ *  kalau tidak ada key / limit habis / error. Jadi tanpa key pun tetap jalan
+ *  (Drive OCR), tapi dengan key akurasinya jauh lebih tinggi (confidence high).
+ *  Dapatkan key gratis di https://aistudio.google.com → Get API key → Create.
  * ============================================================ */
 const SHEET_ID = '1HPC2u3WzActS4IefMfjVmmq7_zwnKkRS1kxiQHrMdyA';
 const PARENT_FOLDER_ID = '1GtZUUd7jyHHZmgleqlmIhbsIn-i_JTOx';
@@ -63,12 +62,13 @@ const SHEET_DETAIL = 'Struk_Detail';
 const RECEIPT_SHARING_MODE = 'ANYONE';
 
 // Batas pemanggilan OCR per PIN per hari — jaga-jaga kalau endpoint
-// disalahgunakan / dipanggil berulang di luar app (Drive API OCR juga
-// punya kuota harian di level akun Google, jadi tetap perlu dijaga).
-const OCR_DAILY_LIMIT_PER_PIN = 150;
+// disalahgunakan / dipanggil berulang di luar app.
+const OCR_DAILY_LIMIT_PER_PIN = 150; // Gemini free tier ~1500/hari, Drive OCR juga ada kuota; 150 aman
 
-// Bahasa OCR Google Drive. 'id' = Indonesia. Ganti/']en' kalau strukmu
-// banyak yang berbahasa Inggris (ATM/hotel internasional, dll).
+// Model Gemini untuk OCR AI. 2.0-flash paling murah & cepat untuk struk.
+const GEMINI_MODEL = 'gemini-2.0-flash';
+
+// Bahasa OCR fallback Drive. 'id' = Indonesia.
 const OCR_LANGUAGE = 'id';
 
 /* ================= AUTH ================= */
@@ -204,7 +204,7 @@ function nomorKey_(s) {
   return normalizeNomor_(s).toUpperCase();
 }
 
-/* ================= OCR (GRATIS — Google Drive OCR, bukan API berbayar) ================= */
+/* ================= OCR (HYBRID: Gemini AI → fallback Drive OCR) ================= */
 
 function checkOcrQuota_(pin) {
   const props = PropertiesService.getScriptProperties();
@@ -240,9 +240,20 @@ function exportGoogleDocAsText_(fileId) {
 function ocrStruk_(base64, mimeType, pin) {
   checkOcrQuota_(pin);
 
-  // Pastikan Advanced Service "Drive API" sudah diaktifkan (lihat SETUP #4).
+  // 1) Coba Gemini AI dulu kalau ada key — akurasi tinggi, ~1500/hari gratis
+  const geminiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (geminiKey && String(geminiKey).trim()) {
+    try {
+      return geminiOcr_(base64, mimeType, String(geminiKey).trim());
+    } catch (e) {
+      Logger.log('Gemini OCR gagal, fallback Drive OCR: ' + e);
+      // jangan throw — lanjut fallback ke Drive OCR di bawah
+    }
+  }
+
+  // 2) Fallback Drive OCR gratis (perlu Advanced Service Drive API)
   if (typeof Drive === 'undefined') {
-    throw new Error('Advanced Service "Drive API" belum diaktifkan di Apps Script (Services > Drive API).');
+    throw new Error('GEMINI_API_KEY belum diisi dan Drive API belum diaktifkan. Isi GEMINI_API_KEY di Script Properties atau aktifkan Drive API (Services > Drive API).');
   }
 
   const blob = Utilities.newBlob(Utilities.base64Decode(base64), mimeType || 'image/jpeg', 'struk_ocr_temp');
@@ -259,11 +270,46 @@ function ocrStruk_(base64, mimeType, pin) {
     const text = exportGoogleDocAsText_(tempDocId);
     return parseReceiptText_(text);
   } finally {
-    // Selalu bersihkan file Google Doc sementara, sukses maupun gagal parse.
     if (tempDocId) {
       try { DriveApp.getFileById(tempDocId).setTrashed(true); } catch (e) { /* abaikan */ }
     }
   }
+}
+
+function geminiOcr_(base64, mimeType, apiKey) {
+  const prompt = 'Kamu adalah OCR struk Indonesia. Dari gambar struk ini ekstrak JSON saja tanpa markdown: '
+    + '{"total": number|null, "merchant": string|null, "tanggal": "YYYY-MM-DD"|null, "kategori_suggest": string} '
+    + 'Aturan: total = angka grand total yang dibayar (tanpa Rp/titik/koma, contoh 125000). merchant = nama toko. tanggal = format YYYY-MM-DD jika terbaca. kategori_suggest pilih salah satu: Transportasi, Makan & Minum, Akomodasi, Komunikasi, Perlengkapan / ATK, Lainnya. Jika tidak yakin isi null jangan mengarang.';
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(GEMINI_MODEL) + ':generateContent?key=' + encodeURIComponent(apiKey);
+  const payload = {
+    contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType || 'image/jpeg', data: base64 } }] }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 512, responseMimeType: 'application/json' }
+  };
+  const resp = UrlFetchApp.fetch(url, {
+    method: 'post', contentType: 'application/json',
+    payload: JSON.stringify(payload), muteHttpExceptions: true
+  });
+  const code = resp.getResponseCode();
+  const body = resp.getContentText();
+  if (code !== 200) throw new Error('Gemini OCR gagal (' + code + '): ' + body.slice(0, 400));
+  const j = JSON.parse(body);
+  const text = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts
+    ? j.candidates[0].content.parts.map(function(p){return p.text||'';}).join('') : '';
+  let parsed;
+  try { parsed = JSON.parse(text); } catch (e2) {
+    const m = text.match(/\{[\s\S]*\}/);
+    parsed = m ? JSON.parse(m[0]) : null;
+  }
+  if (!parsed) throw new Error('Gemini tidak mengembalikan JSON valid: ' + text.slice(0,200));
+  const total = parsed.total != null && String(parsed.total).trim() !== '' ? Number(String(parsed.total).replace(/[^0-9]/g,'')) : null;
+  if (total != null && (isNaN(total) || total <= 0)) throw new Error('Gemini total tidak valid');
+  return {
+    total: total || null,
+    merchant: parsed.merchant ? String(parsed.merchant).trim().slice(0,60) : null,
+    tanggal: parsed.tanggal ? String(parsed.tanggal).trim() : null,
+    kategori_suggest: parsed.kategori_suggest || 'Lainnya',
+    confidence: (total != null && total > 0) ? 'high' : 'low'
+  };
 }
 
 // Baca teks hasil OCR mentah dan cari total, merchant, tanggal, kategori.

@@ -387,8 +387,42 @@ function showToast(msg, isErr){
   clearTimeout(t._timer);
   t._timer = setTimeout(()=>t.classList.remove('show'), 2600);
 }
-// pola /thumbnail (bukan /uc?export=view yang lama & sering diblok Google untuk hotlink)
+// DEPRECATED: file struk sekarang PRIVATE di Drive (tidak di-setSharing).
+// Thumbnail via /thumbnail akan 403. Gambar harus diambil lewat proxy
+// backend 'getReceiptImage' yang mengembalikan base64. Fungsi ini dibiarkan
+// hanya sebagai fallback kalau diperlukan di lingkungan tanpa private mode.
 function driveThumbUrl(fileId){ return 'https://drive.google.com/thumbnail?id=' + fileId + '&sz=w600'; }
+// cache base64 hasil getReceiptImage agar tidak fetch berulang
+const receiptCache = new Map();
+async function fetchReceiptSrc_(fileId){
+  if(!fileId) return '';
+  if(receiptCache.has(fileId)) return receiptCache.get(fileId);
+  try{
+    const res = await callBackend('getReceiptImage', { fileId: fileId });
+    const src = 'data:' + (res.mimeType || 'image/jpeg') + ';base64,' + res.base64;
+    receiptCache.set(fileId, src);
+    return src;
+  }catch(e){
+    console.warn('getReceiptImage gagal', fileId, e);
+    return '';
+  }
+}
+async function hydrateReceiptImages_(root){
+  root = root || document;
+  const imgs = root.querySelectorAll('img[data-file-id]');
+  for(const img of imgs){
+    const fid = img.getAttribute('data-file-id');
+    if(!fid) continue;
+    // jika sudah ada src data: jangan fetch lagi
+    if(img.src && img.src.startsWith('data:')) continue;
+    const src = await fetchReceiptSrc_(fid);
+    if(src) img.src = src;
+    else {
+      // fallback coba thumbnail (kalau file masih public di env lain)
+      img.src = driveThumbUrl(fid);
+    }
+  }
+}
 
 function friendlyError(err){
   const msg = String((err && err.message) || err || '');
@@ -539,7 +573,7 @@ function persistLocalDraft_(){
     const toSave = {
       caInfo: caInfo, caSaved: caSaved,
       entries: entries.filter(e => e.driveStatus !== 'saved').map(e => ({
-        id: e.id, thumb: e.thumb, total: e.total, merchant: e.merchant, tanggal: e.tanggal,
+        id: e.id, thumb: e.thumb, driveFileId: e.driveFileId || '', total: e.total, merchant: e.merchant, tanggal: e.tanggal,
         kategori: e.kategori, keterangan: e.keterangan, confidence: e.confidence, driveStatus: e.driveStatus
       })),
       at: Date.now()
@@ -646,7 +680,7 @@ document.getElementById('btnLoadCa').addEventListener('click', async ()=>{
     caSaved = true;
     caInfoDirty = false;
     entries = data.details.map(d => ({
-      id: d.idStruk, thumb: driveThumbUrl(d.driveFileId), total: Number(d.total)||0,
+      id: d.idStruk, thumb: '', driveFileId: d.driveFileId, total: Number(d.total)||0,
       merchant: d.merchant, tanggal: d.tanggal, kategori: d.kategori, keterangan: d.keterangan,
       confidence: d.confidence, driveStatus: 'saved', driveFileUrl: d.driveFileUrl
     }));
@@ -659,6 +693,10 @@ document.getElementById('btnLoadCa').addEventListener('click', async ()=>{
     updateLedger();
     updateUploadLock();
     renderEntriesList();
+    // hydrate gambar private lewat proxy backend (async, tidak block UI)
+    hydrateReceiptImages_(document.getElementById('entriesList'));
+    // juga untuk laporan jika sedang terbuka
+    hydrateReceiptImages_(document.getElementById('reportContent'));
     clearLocalDraft_();
     showToast('Data CA ' + nomor + ' dimuat');
   }catch(err){
@@ -788,9 +826,12 @@ async function uploadEntryToBackend(entry){
     });
     entry.driveStatus = 'saved';
     entry.driveFileUrl = res.driveFileUrl;
-    // ganti data URL base64 (berat di memori) dengan link thumbnail Drive begitu sudah tersimpan,
-    // supaya sesi dengan banyak struk nggak numpuk base64 di RAM browser
-    entry.thumb = driveThumbUrl(res.driveFileId);
+    entry.driveFileId = res.driveFileId;
+    // thumb sudah base64 dari review — simpan ke cache agar list berikutnya bisa pakai tanpa fetch ulang
+    // JANGAN ganti dengan driveThumbUrl karena file sekarang PRIVATE (thumbnail akan 403)
+    if(entry.thumb && entry.thumb.startsWith('data:')){
+      receiptCache.set(res.driveFileId, entry.thumb);
+    }
     persistLocalDraft_();
     showToast('Struk tersimpan ke Drive & Sheets');
   }catch(err){
@@ -815,9 +856,13 @@ function renderEntriesList(){
     else if(e.driveStatus === 'failed') statusHtml = `⚠️ Gagal tersimpan — <button class="icon-btn" style="padding:0;font-size:11px;text-decoration:underline;" onclick="retryUpload('${e.id}')">Coba lagi</button>`;
     else statusHtml = '⏳ Menunggu diunggah';
 
+    // thumb: jika sudah base64 (baru upload) pakai langsung, kalau dari load (private) pakai proxy via data-file-id
+    const imgSrc = (e.thumb && e.thumb.startsWith('data:')) ? e.thumb : '';
+    const fileIdAttr = e.driveFileId ? ' data-file-id="'+escapeHtml(e.driveFileId)+'"' : '';
+    const thumbSrc = imgSrc || (e.thumb || '');
     return `
     <div class="entry-card" data-id="${e.id}">
-      <img class="entry-thumb" src="${e.thumb}" alt="struk">
+      <img class="entry-thumb" src="${thumbSrc}"${fileIdAttr} alt="struk">
       <div class="entry-body">
         <div class="entry-top">
           <div>
@@ -838,6 +883,8 @@ function renderEntriesList(){
       </div>
     </div>`;
   }).join('');
+  // hydrate gambar private setelah DOM terpasang
+  setTimeout(()=> hydrateReceiptImages_(wrap), 50);
 }
 
 function retryUpload(id){ const entry = entries.find(e=>e.id===id); if(entry) uploadEntryToBackend(entry); }
@@ -969,12 +1016,14 @@ async function openCaFromPm(nomor){
     const data = await callBackend('getCaData', { nomorCa: nomor });
     caInfo = { nomor: data.header.nomor, nama: data.header.nama, dept: data.header.dept, jumlah: Number(data.header.jumlah)||0, status: data.header.status || 'Draft' };
     entries = data.details.map(d => ({
-      id: d.idStruk, thumb: driveThumbUrl(d.driveFileId), total: Number(d.total)||0,
+      id: d.idStruk, thumb: '', driveFileId: d.driveFileId, total: Number(d.total)||0,
       merchant: d.merchant, tanggal: d.tanggal, kategori: d.kategori, keterangan: d.keterangan,
       confidence: d.confidence, driveStatus: 'saved'
     }));
     reportReturnTab = 'dashboard';
     switchTab('report');
+    // hydrate setelah report dirender (switchTab memanggil renderReport)
+    setTimeout(()=> hydrateReceiptImages_(document.getElementById('reportContent')), 100);
   }catch(err){
     showToast('Gagal membuka CA: ' + friendlyError(err), true);
   }
@@ -1010,9 +1059,14 @@ function renderReport(){
     `).join('');
 
   const grid = document.getElementById('lampiranGrid');
-  grid.innerHTML = entries.map((e,i)=>`
-    <div class="lampiran-item"><img src="${e.thumb}" alt="struk ${i+1}"><div class="lnum">#${i+1}</div><div class="ltotal">${formatRupiah(e.total)}</div></div>
-  `).join('');
+  grid.innerHTML = entries.map((e,i)=>{
+    const src = (e.thumb && e.thumb.startsWith('data:')) ? e.thumb : '';
+    const fid = e.driveFileId ? ' data-file-id="'+escapeHtml(e.driveFileId)+'"' : '';
+    return `<div class="lampiran-item"><img src="${src}"${fid} alt="struk ${i+1}"><div class="lnum">#${i+1}</div><div class="ltotal">${formatRupiah(e.total)}</div></div>`;
+  }).join('');
+  // hydrate lampiran juga (report bisa dibuka via PM tanpa lewat renderEntriesList)
+  // delay sedikit agar DOM sudah terpasang
+  setTimeout(()=> hydrateReceiptImages_(document.getElementById('lampiranGrid')), 50);
 }
 
 /* ================= INIT ================= */

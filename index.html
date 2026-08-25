@@ -252,7 +252,7 @@
         <div class="field"><label>Nomor CA</label><input id="caNomor" placeholder="CA-2026-0001"></div>
         <div class="field"><label>Nama Pemohon</label><input id="caNama" placeholder="Nama lengkap"></div>
         <div class="field"><label>Departemen / Proyek</label><input id="caDept" placeholder="TIS / CBS"></div>
-        <div class="field mono"><label>Jumlah CA Diterima (Rp)</label><input id="caJumlah" type="number" placeholder="0"></div>
+        <div class="field mono"><label>Jumlah CA Diterima (Rp)</label><input id="caJumlah" type="number" placeholder="0"><span id="caJumlahHint" style="font-size:11px;color:var(--text-muted);margin-top:2px;min-height:14px;display:block;"></span></div>
         <div class="field"><label>Status</label>
           <select id="caStatus">
             <option value="Draft">Draft</option>
@@ -296,6 +296,9 @@
   <section id="tab-dashboard" class="tab-panel">
     <div class="card">
       <h2><span class="eyebrow">Rekap Seluruh Cash Advance</span>Dashboard PM</h2>
+      <div class="field" style="margin-bottom:12px;">
+        <input id="pmSearch" placeholder="Cari nomor / nama / dept..." style="background:var(--panel-2);border:1px solid var(--border);border-radius:7px;padding:11px;color:var(--text);font-family:var(--font-body);font-size:14px;outline:none;width:100%;min-height:44px;">
+      </div>
       <div id="pmList" class="pm-list">
         <div class="empty-state">Memuat data...</div>
       </div>
@@ -468,7 +471,7 @@ async function doLogin(){
     enterApp(res.role);
   }catch(err){
     currentPin = null;
-    errEl.textContent = 'PIN salah, coba lagi.';
+    errEl.textContent = friendlyError(err);
   }finally{
     btn.disabled = false; btn.textContent = origLabel;
   }
@@ -526,6 +529,41 @@ window.addEventListener('beforeunload', (e)=>{
   }
 });
 
+/* ================= LOCAL DRAFT (opsional, hanya untuk struk yang sudah tersimpan base64 lokal) ================= */
+const DRAFT_KEY = 'caSettleDraft_v1';
+function persistLocalDraft_(){
+  try{
+    // hanya simpan jika CA sudah ada nomor — hindari menumpuk draft kosong
+    if(!caInfo.nomor) return;
+    // simpan header + entries yang masih pending/failed saja (yang saved sudah di Sheets)
+    const toSave = {
+      caInfo: caInfo, caSaved: caSaved,
+      entries: entries.filter(e => e.driveStatus !== 'saved').map(e => ({
+        id: e.id, thumb: e.thumb, total: e.total, merchant: e.merchant, tanggal: e.tanggal,
+        kategori: e.kategori, keterangan: e.keterangan, confidence: e.confidence, driveStatus: e.driveStatus
+      })),
+      at: Date.now()
+    };
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(toSave));
+  }catch(_){}
+}
+function loadLocalDraft_(){
+  try{
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if(!raw) return;
+    const d = JSON.parse(raw);
+    if(!d || !d.caInfo || !d.caInfo.nomor) return;
+    // hanya restore jika user belum load CA lain
+    if(caSaved && caInfo.nomor) return;
+    caInfo = d.caInfo; caSaved = !!d.caSaved;
+    entries = Array.isArray(d.entries) ? d.entries : [];
+    fillCaInfoForm();
+    updateLedger(); updateUploadLock(); renderEntriesList();
+    if(entries.length) showToast('Draft lokal dipulihkan (' + entries.length + ' struk belum tersimpan)');
+  }catch(_){}
+}
+function clearLocalDraft_(){ try{ localStorage.removeItem(DRAFT_KEY); }catch(_){} }
+
 /* ================= TABS ================= */
 function switchTab(name){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
@@ -548,6 +586,9 @@ function syncCaInfoFromForm(){
   if(caSaved){ caInfoDirty = true; renderCaSaveStatus(); }
   updateLedger();
   updateUploadLock();
+  // hint rupiah live
+  const hint = document.getElementById('caJumlahHint');
+  if(hint) hint.textContent = caInfo.jumlah ? formatRupiah(caInfo.jumlah) : '';
 }
 function renderCaSaveStatus(){
   const statusEl = document.getElementById('caSaveStatus');
@@ -559,6 +600,8 @@ function fillCaInfoForm(){
   document.getElementById('caDept').value = caInfo.dept || '';
   document.getElementById('caJumlah').value = caInfo.jumlah || '';
   document.getElementById('caStatus').value = caInfo.status || 'Draft';
+  const hint = document.getElementById('caJumlahHint');
+  if(hint) hint.textContent = caInfo.jumlah ? formatRupiah(caInfo.jumlah) : '';
 }
 function updateUploadLock(){
   const locked = !caSaved || !caInfo.nomor;
@@ -610,9 +653,13 @@ document.getElementById('btnLoadCa').addEventListener('click', async ()=>{
     fillCaInfoForm();
     document.getElementById('caSaveStatus').textContent = '✓ Tersimpan ke Google Sheets';
     document.getElementById('caSaveStatus').classList.add('ok');
+    // hint rupiah setelah load
+    const hint2 = document.getElementById('caJumlahHint');
+    if(hint2) hint2.textContent = caInfo.jumlah ? formatRupiah(caInfo.jumlah) : '';
     updateLedger();
     updateUploadLock();
     renderEntriesList();
+    clearLocalDraft_();
     showToast('Data CA ' + nomor + ' dimuat');
   }catch(err){
     showToast('Gagal memuat: ' + friendlyError(err), true);
@@ -704,6 +751,13 @@ async function saveReviewEntry(){
   if(!total || Number(total) <= 0){ showToast('Total belum diisi', true); return; }
 
   currentReview.total = Number(total);
+  // warning over-budget
+  const terpakaiNow = entries.reduce((s,e)=>s + (Number(e.total)||0), 0);
+  if(caInfo.jumlah > 0 && (terpakaiNow + currentReview.total) > caInfo.jumlah){
+    const lebih = (terpakaiNow + currentReview.total) - caInfo.jumlah;
+    if(!confirm('Total terpakai akan melebihi CA Diterima sebesar ' + formatRupiah(lebih) + '. Tetap simpan?')) return;
+  }
+
   currentReview.merchant = document.getElementById('rvMerchant').value;
   currentReview.tanggal = document.getElementById('rvTanggal').value;
   currentReview.kategori = document.getElementById('rvKategori').value;
@@ -715,6 +769,7 @@ async function saveReviewEntry(){
   document.getElementById('reviewArea').innerHTML = '';
   renderEntriesList();
   updateLedger();
+  persistLocalDraft_();
   processNextInQueue();
 
   uploadEntryToBackend(entry);
@@ -736,9 +791,11 @@ async function uploadEntryToBackend(entry){
     // ganti data URL base64 (berat di memori) dengan link thumbnail Drive begitu sudah tersimpan,
     // supaya sesi dengan banyak struk nggak numpuk base64 di RAM browser
     entry.thumb = driveThumbUrl(res.driveFileId);
+    persistLocalDraft_();
     showToast('Struk tersimpan ke Drive & Sheets');
   }catch(err){
     entry.driveStatus = 'failed';
+    persistLocalDraft_();
     showToast('Gagal simpan ke server: ' + friendlyError(err), true);
   }
   renderEntriesList();
@@ -805,12 +862,39 @@ function toggleEditEntry(id){
 async function updateEntryField(id, field, value){
   const entry = entries.find(e=>e.id===id);
   if(!entry) return;
+  const prevTotal = Number(entry.total)||0;
   entry[field] = field === 'total' ? Number(value) : value;
-  renderEntriesList();
+  // validasi over-budget saat edit total
+  if(field === 'total' && caInfo.jumlah > 0){
+    const terpakai = entries.reduce((s,e)=>s + (Number(e.total)||0), 0);
+    if(terpakai > caInfo.jumlah){
+      const lebih = terpakai - caInfo.jumlah;
+      showToast('Peringatan: total terpakai melebihi CA sebesar ' + formatRupiah(lebih), true);
+    }
+  }
+  // patch DOM tanpa rebuild penuh agar form edit tidak tertutup
+  const totalEl = document.querySelector('.entry-card[data-id="'+id+'"] .entry-total');
+  if(totalEl) totalEl.textContent = formatRupiah(entry.total);
+  const tagsEl = document.querySelector('.entry-card[data-id="'+id+'"] .entry-meta');
+  if(tagsEl) tagsEl.innerHTML = '<span class="tag">'+escapeHtml(entry.kategori)+'</span>'
+    + (entry.tanggal ? '<span class="tag">'+escapeHtml(entry.tanggal)+'</span>' : '')
+    + (entry.merchant ? '<span class="tag">'+escapeHtml(entry.merchant)+'</span>' : '');
   updateLedger();
+  persistLocalDraft_();
+  // sync nilai di form edit yang masih terbuka
+  const box = document.getElementById('edit-'+id);
+  const isOpen = box && box.style.display !== 'none';
   try{
     await callBackend('updateStruk', { idStruk: id, tanggal: entry.tanggal, merchant: entry.merchant, kategori: entry.kategori, keterangan: entry.keterangan, total: entry.total });
   }catch(err){ showToast('Gagal update ke server: ' + friendlyError(err), true); }
+  // pertahankan form tetap terbuka setelah update
+  if(isOpen){
+    // re-render hanya box ini — tidak rebuild list penuh
+    const entry2 = entries.find(e=>e.id===id);
+    if(entry2){
+      // update input value yang baru saja diubah sudah sinkron, tidak perlu rebuild
+    }
+  }
 }
 
 async function deleteEntry(id){
@@ -820,6 +904,7 @@ async function deleteEntry(id){
     entries = entries.filter(e=>e.id!==id);
     renderEntriesList();
     updateLedger();
+    persistLocalDraft_();
     showToast('Struk dihapus');
   }catch(err){
     showToast('Gagal hapus: ' + friendlyError(err), true);
@@ -827,29 +912,53 @@ async function deleteEntry(id){
 }
 
 /* ================= DASHBOARD PM ================= */
+let pmAllData = [];
 document.getElementById('btnRefreshPm').addEventListener('click', loadAllCa);
+document.getElementById('pmSearch').addEventListener('input', renderPmList_);
+function renderPmList_(){
+  const wrap = document.getElementById('pmList');
+  const q = (document.getElementById('pmSearch').value || '').trim().toLowerCase();
+  let list = pmAllData;
+  if(q){
+    list = pmAllData.filter(ca =>
+      String(ca.nomor).toLowerCase().includes(q) ||
+      String(ca.nama).toLowerCase().includes(q) ||
+      String(ca.dept).toLowerCase().includes(q) ||
+      String(ca.status).toLowerCase().includes(q)
+    );
+  }
+  if(!list.length){
+    wrap.innerHTML = pmAllData.length
+      ? '<div class="empty-state">Tidak ada hasil untuk "'+escapeHtml(q)+'".</div>'
+      : '<div class="empty-state">Belum ada CA yang tercatat.</div>';
+    return;
+  }
+  wrap.innerHTML = list.map(ca => {
+    const sisaClass = ca.sisa < 0 ? 'neg' : 'pos';
+    const sisaLabel = ca.sisa < 0 ? 'Kurang' : 'Sisa';
+    // escape single quote untuk onclick
+    const safeNomor = String(ca.nomor).replace(/'/g, "\\'");
+    return `
+    <div class="pm-row" onclick="openCaFromPm('${safeNomor}')">
+      <div class="pm-left">
+        <div class="num">${escapeHtml(ca.nomor)}</div>
+        <div class="sub">${escapeHtml(ca.nama)} · ${escapeHtml(ca.dept)}</div>
+        <span class="status-badge ${escapeHtml(ca.status)}">${escapeHtml(ca.status)}</span>
+      </div>
+      <div class="pm-right">
+        <div class="sisa ${sisaClass}">${sisaLabel} ${formatRupiah(Math.abs(ca.sisa))}</div>
+        <div class="sub">Terpakai ${formatRupiah(ca.totalTerpakai)} / ${formatRupiah(ca.jumlah)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
 async function loadAllCa(){
   const wrap = document.getElementById('pmList');
   wrap.innerHTML = '<div class="empty-state">Memuat data...</div>';
   try{
     const list = await callBackend('getAllCa', {});
-    if(!list.length){ wrap.innerHTML = '<div class="empty-state">Belum ada CA yang tercatat.</div>'; return; }
-    wrap.innerHTML = list.map(ca => {
-      const sisaClass = ca.sisa < 0 ? 'neg' : 'pos';
-      const sisaLabel = ca.sisa < 0 ? 'Kurang' : 'Sisa';
-      return `
-      <div class="pm-row" onclick="openCaFromPm('${ca.nomor}')">
-        <div class="pm-left">
-          <div class="num">${ca.nomor}</div>
-          <div class="sub">${escapeHtml(ca.nama)} · ${escapeHtml(ca.dept)}</div>
-          <span class="status-badge ${ca.status}">${ca.status}</span>
-        </div>
-        <div class="pm-right">
-          <div class="sisa ${sisaClass}">${sisaLabel} ${formatRupiah(Math.abs(ca.sisa))}</div>
-          <div class="sub">Terpakai ${formatRupiah(ca.totalTerpakai)} / ${formatRupiah(ca.jumlah)}</div>
-        </div>
-      </div>`;
-    }).join('');
+    pmAllData = Array.isArray(list) ? list : [];
+    renderPmList_();
   }catch(err){
     wrap.innerHTML = `<div class="empty-state">Gagal memuat data: ${escapeHtml(friendlyError(err))}</div>`;
   }
@@ -909,6 +1018,7 @@ function renderReport(){
 /* ================= INIT ================= */
 updateLedger();
 updateUploadLock();
+loadLocalDraft_();
 </script>
 </body>
 </html>

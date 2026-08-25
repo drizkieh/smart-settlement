@@ -65,8 +65,8 @@ const RECEIPT_SHARING_MODE = 'ANYONE';
 // disalahgunakan / dipanggil berulang di luar app.
 const OCR_DAILY_LIMIT_PER_PIN = 150; // Gemini free tier ~1500/hari, Drive OCR juga ada kuota; 150 aman
 
-// Model Gemini untuk OCR AI. 2.0-flash paling murah & cepat untuk struk.
-const GEMINI_MODEL = 'gemini-2.0-flash';
+// Model Gemini untuk OCR AI. 3.6-flash adalah yang tersedia untuk user baru (2.5 sudah sunset untuk new users).
+const GEMINI_MODEL = 'gemini-3.6-flash';
 
 // Bahasa OCR fallback Drive. 'id' = Indonesia.
 const OCR_LANGUAGE = 'id';

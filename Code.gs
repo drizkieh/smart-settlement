@@ -277,13 +277,20 @@ function ocrStruk_(base64, mimeType, pin) {
 }
 
 function geminiOcr_(base64, mimeType, apiKey) {
-  const prompt = 'Kamu adalah OCR struk Indonesia. Dari gambar struk ini ekstrak JSON saja tanpa markdown: '
-    + '{"total": number|null, "merchant": string|null, "tanggal": "YYYY-MM-DD"|null, "kategori_suggest": string} '
-    + 'Aturan: total = angka grand total yang dibayar (tanpa Rp/titik/koma, contoh 125000). merchant = nama toko. tanggal = format YYYY-MM-DD jika terbaca. kategori_suggest pilih salah satu: Transportasi, Makan & Minum, Akomodasi, Komunikasi, Perlengkapan / ATK, Lainnya. Jika tidak yakin isi null jangan mengarang.';
+  // Prompt diperkuat untuk struk Indonesia: tanggal bisa dd.mm.yy / dd/mm/yyyy / dd-mm-yy, merchant di baris atas besar
+  const prompt = 'Kamu adalah OCR struk Indonesia. Tugas: baca gambar struk dan keluarkan JSON valid tanpa markdown, format persis:\n'
+    + '{"total": number|null, "merchant": string|null, "tanggal": "YYYY-MM-DD"|null, "kategori_suggest": string}\n'
+    + 'Aturan WAJIB:\n'
+    + '- total = angka TOTAL/TOTAL BELANJA/GRAND TOTAL yang dibayar (tanpa Rp/titik/koma, contoh 38300). Prioritas: baris dengan kata TOTAL BELANJA / TOTAL BAYAR / GRAND TOTAL, bukan subtotal. Jika ada titik ribuan (38.300) jadi 38300.\n'
+    + '- merchant = nama toko/merchant, ambil dari 1-3 baris paling atas yang huruf besar/tebal (contoh "JAYA WILAYA" atau "JAYA WILAYA JATI RAHAYU"). Jangan ambil alamat, ambil nama tokonya saja, max 60 char.\n'
+    + '- tanggal = format YYYY-MM-DD. Struk Indonesia sering tulis dd.mm.yy atau dd/mm/yy atau dd-mm-yyyy (contoh 15.08.25 -> 2025-08-15, 15/08/2025 -> 2025-08-15). Konversi yy 2-digit jadi 20yy.\n'
+    + '- kategori_suggest pilih salah satu: Transportasi, Makan & Minum, Akomodasi, Komunikasi, Perlengkapan / ATK, Lainnya. Tebak dari teks (misal ada "KABEL", "FRESH", "COY ASEN" -> Lainnya atau Perlengkapan).\n'
+    + '- Jika tidak yakin, isi null jangan mengarang. Merchant jangan dikosongkan kalau baris atas jelas terbaca.\n'
+    + 'Contoh: struk dengan "JAYA WILAYA", tanggal "15.08.25", TOTAL BELANJA 38.300 -> {"total":38300,"merchant":"JAYA WILAYA","tanggal":"2025-08-15","kategori_suggest":"Lainnya"}';
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(GEMINI_MODEL) + ':generateContent?key=' + encodeURIComponent(apiKey);
   const payload = {
     contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType || 'image/jpeg', data: base64 } }] }],
-    generationConfig: { temperature: 0.1, maxOutputTokens: 512, responseMimeType: 'application/json' }
+    generationConfig: { temperature: 0.05, maxOutputTokens: 600, responseMimeType: 'application/json' }
   };
   const resp = UrlFetchApp.fetch(url, {
     method: 'post', contentType: 'application/json',
@@ -291,25 +298,48 @@ function geminiOcr_(base64, mimeType, apiKey) {
   });
   const code = resp.getResponseCode();
   const body = resp.getContentText();
-  if (code !== 200) throw new Error('Gemini OCR gagal (' + code + '): ' + body.slice(0, 400));
+  if (code !== 200) throw new Error('Gemini OCR gagal (' + code + '): ' + body.slice(0, 600));
   const j = JSON.parse(body);
   const text = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts
     ? j.candidates[0].content.parts.map(function(p){return p.text||'';}).join('') : '';
+  // Log untuk debug di Executions
+  Logger.log('Gemini raw: ' + text.slice(0,500));
   let parsed;
   try { parsed = JSON.parse(text); } catch (e2) {
     const m = text.match(/\{[\s\S]*\}/);
-    parsed = m ? JSON.parse(m[0]) : null;
+    if (m) { try { parsed = JSON.parse(m[0]); } catch(e3){} }
+    if (!parsed) throw new Error('Gemini tidak mengembalikan JSON valid: ' + text.slice(0,400));
   }
-  if (!parsed) throw new Error('Gemini tidak mengembalikan JSON valid: ' + text.slice(0,200));
+  // Normalisasi tanggal jika masih dd.mm.yy
+  let tanggal = parsed.tanggal ? String(parsed.tanggal).trim() : null;
+  if (tanggal && /^\d{1,2}[.\/\-]\d{1,2}[.\/\-]\d{2,4}$/.test(tanggal)) {
+    tanggal = normalizeTanggalStr_(tanggal);
+  }
+  if (tanggal && !/^\d{4}-\d{2}-\d{2}$/.test(tanggal)) tanggal = normalizeTanggalStr_(tanggal) || null;
   const total = parsed.total != null && String(parsed.total).trim() !== '' ? Number(String(parsed.total).replace(/[^0-9]/g,'')) : null;
-  if (total != null && (isNaN(total) || total <= 0)) throw new Error('Gemini total tidak valid');
+  // total 0 dianggap null
+  const finalTotal = (total != null && !isNaN(total) && total > 0) ? total : null;
   return {
-    total: total || null,
+    total: finalTotal,
     merchant: parsed.merchant ? String(parsed.merchant).trim().slice(0,60) : null,
-    tanggal: parsed.tanggal ? String(parsed.tanggal).trim() : null,
+    tanggal: tanggal,
     kategori_suggest: parsed.kategori_suggest || 'Lainnya',
-    confidence: (total != null && total > 0) ? 'high' : 'low'
+    confidence: (finalTotal != null && finalTotal > 0) ? 'high' : 'low'
   };
+}
+
+function normalizeTanggalStr_(s){
+  s = String(s||'').trim();
+  let m = s.match(/^(\d{1,2})[.\/\-](\d{1,2})[.\/\-](\d{2,4})$/);
+  if(m){
+    let d=m[1], mo=m[2], y=m[3];
+    if(y.length===2) y='20'+y;
+    d=d.padStart(2,'0'); mo=mo.padStart(2,'0');
+    if(Number(mo)>=1 && Number(mo)<=12 && Number(d)>=1 && Number(d)<=31) return y+'-'+mo+'-'+d;
+  }
+  m = s.match(/^(20\d{2})-(\d{1,2})-(\d{1,2})$/);
+  if(m) return m[1]+'-'+m[2].padStart(2,'0')+'-'+m[3].padStart(2,'0');
+  return null;
 }
 
 // Baca teks hasil OCR mentah dan cari total, merchant, tanggal, kategori.

@@ -223,12 +223,16 @@
   .zoom-close{position:absolute;top:16px;right:16px;z-index:3;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:999px;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:18px;}
 
   @media print{
-    body{background:#fff;color:#000;padding:0;}
-    .no-print{display:none !important;}
-    #app{max-width:100%;padding:0;}
-    .card,.ledger-strip,.summary-box{background:#fff;border-color:#ccc;}
+    html, body{height:auto !important;overflow:visible !important;background:#fff !important;color:#000 !important;padding:0 !important;}
+    .no-print, #imgZoomModal, #toast{display:none !important;}
+    #app{max-width:100% !important;padding:0 !important;overflow:visible !important;}
+    #loginScreen{display:none !important;}
+    .tab-panel{display:none !important;}
+    .tab-panel.active, #tab-report, #reportContent{display:block !important;overflow:visible !important;height:auto !important;animation:none !important;}
+    .card,.ledger-strip,.summary-box{background:#fff !important;border-color:#ccc !important;overflow:visible !important;break-inside:auto;}
+    .ledger-strip{position:static !important;top:auto !important;}
     .ledger-item .value, .entry-total, table.report-table td.num{color:#000 !important;}
-    table.report-table th{color:#555;}
+    table.report-table th{color:#555 !important;}
     .lampiran-item{break-inside:avoid;}
     tr{break-inside:avoid;}
     .table-scroll{overflow:visible;}

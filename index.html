@@ -205,6 +205,23 @@
 
   .report-actions{display:flex;justify-content:space-between;gap:10px;margin-bottom:18px;flex-wrap:wrap;}
 
+  /* ---------- Lampiran zoom ---------- */
+  .lampiran-item{cursor:pointer;transition:transform .12s, border-color .12s;}
+  .lampiran-item:hover{transform:translateY(-2px);border-color:var(--accent);}
+  .lampiran-item img{cursor:zoom-in;}
+  #imgZoomModal{position:fixed;inset:0;z-index:300;display:none;align-items:center;justify-content:center;}
+  #imgZoomModal.open{display:flex;}
+  .zoom-backdrop{position:absolute;inset:0;background:rgba(8,10,14,0.88);backdrop-filter:blur(6px);}
+  .zoom-stage{position:relative;z-index:1;width:100%;height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:60px 16px 80px;}
+  #zoomImg{max-width:min(92vw, 1100px);max-height:78vh;object-fit:contain;border-radius:10px;border:1px solid var(--border);background:var(--panel-2);transform-origin:center center;transition:transform .18s ease;cursor:grab;will-change:transform;}
+  #zoomImg.dragging{cursor:grabbing;transition:none;}
+  .zoom-toolbar{position:absolute;z-index:2;bottom:18px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--border);border-radius:999px;padding:8px 10px;flex-wrap:wrap;justify-content:center;max-width:96vw;}
+  .zoom-toolbar button{background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:999px;padding:8px 12px;font-size:12px;font-weight:700;cursor:pointer;min-height:36px;min-width:36px;}
+  .zoom-toolbar button:hover{border-color:var(--text-muted);}
+  .zoom-toolbar input[type="range"]{width:140px;accent-color:var(--accent);}
+  .zoom-toolbar .scale-label{font-family:var(--font-mono);font-size:12px;color:var(--text-muted);min-width:44px;text-align:center;}
+  .zoom-close{position:absolute;top:16px;right:16px;z-index:3;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:999px;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:18px;}
+
   @media print{
     body{background:#fff;color:#000;padding:0;}
     .no-print{display:none !important;}
@@ -354,6 +371,21 @@
     </div>
   </section>
 
+</div>
+
+<div id="imgZoomModal" aria-hidden="true">
+  <div class="zoom-backdrop" id="zoomBackdrop"></div>
+  <button class="zoom-close" id="btnZoomClose" aria-label="Tutup">✕</button>
+  <div class="zoom-stage" id="zoomStage">
+    <img id="zoomImg" alt="Zoom struk">
+  </div>
+  <div class="zoom-toolbar no-print">
+    <button id="btnZoomOut" title="Zoom out">−</button>
+    <input type="range" id="zoomSlider" min="0.5" max="3" step="0.05" value="1">
+    <button id="btnZoomIn" title="Zoom in">+</button>
+    <span class="scale-label" id="zoomScaleLabel">100%</span>
+    <button id="btnZoomReset" title="Reset">Reset</button>
+  </div>
 </div>
 
 <div id="toast"></div>
@@ -1095,12 +1127,126 @@ function renderReport(){
   grid.innerHTML = entries.map((e,i)=>{
     const src = (e.thumb && e.thumb.startsWith('data:')) ? e.thumb : '';
     const fid = e.driveFileId ? ' data-file-id="'+escapeHtml(e.driveFileId)+'"' : '';
-    return `<div class="lampiran-item"><img src="${src}"${fid} alt="struk ${i+1}"><div class="lnum">#${i+1}</div><div class="ltotal">${formatRupiah(e.total)}</div></div>`;
+    return `<div class="lampiran-item" onclick="openLampiranZoom(${i})" title="Klik untuk zoom"><img src="${src}"${fid} alt="struk ${i+1}"><div class="lnum">#${i+1}</div><div class="ltotal">${formatRupiah(e.total)}</div></div>`;
   }).join('');
   // hydrate lampiran juga (report bisa dibuka via PM tanpa lewat renderEntriesList)
   // delay sedikit agar DOM sudah terpasang
   setTimeout(()=> hydrateReceiptImages_(document.getElementById('lampiranGrid')), 50);
 }
+
+/* ================= LAMPIRAN ZOOM (tab Laporan) ================= */
+let zoomScale = 1, zoomTx = 0, zoomTy = 0;
+let isDraggingZoom = false, dragStartX = 0, dragStartY = 0, startTx = 0, startTy = 0;
+function applyZoomTransform_(){
+  const img = document.getElementById('zoomImg');
+  if(!img) return;
+  img.style.transform = 'translate(' + zoomTx + 'px,' + zoomTy + 'px) scale(' + zoomScale + ')';
+  const label = document.getElementById('zoomScaleLabel');
+  if(label) label.textContent = Math.round(zoomScale*100) + '%';
+  const slider = document.getElementById('zoomSlider');
+  if(slider) slider.value = String(zoomScale);
+}
+function openLampiranZoom(idx){
+  if(idx < 0 || idx >= entries.length) return;
+  const e = entries[idx];
+  const modal = document.getElementById('imgZoomModal');
+  const img = document.getElementById('zoomImg');
+  if(!e || !modal || !img) return;
+  // ambil src terbaik: thumb base64 jika ada, atau cache, atau fetch
+  let src = '';
+  if(e.thumb && e.thumb.startsWith('data:')) src = e.thumb;
+  else if(e.driveFileId && receiptCache.has(e.driveFileId)) src = receiptCache.get(e.driveFileId);
+  else if(e.driveFileId) {
+    // fetch dulu lalu buka
+    fetchReceiptSrc_(e.driveFileId).then(s => {
+      if(s) { receiptCache.set(e.driveFileId, s); img.src = s; }
+      // hydrate grid juga
+      hydrateReceiptImages_(document.getElementById('lampiranGrid'));
+    });
+    src = ''; // sementara kosong, akan terisi setelah fetch
+  }
+  if(!src && e.driveFileId) src = driveThumbUrl(e.driveFileId);
+  img.src = src || '';
+  // simpan index untuk prev/next kalau mau navigasi (opsional)
+  modal.dataset.idx = String(idx);
+  zoomScale = 1; zoomTx = 0; zoomTy = 0;
+  applyZoomTransform_();
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden','false');
+  document.body.style.overflow = 'hidden';
+  // jika src masih kosong (menunggu fetch), tampilkan toast
+  if(!src) showToast('Memuat gambar...', false);
+}
+function closeLampiranZoom_(){
+  const modal = document.getElementById('imgZoomModal');
+  if(!modal) return;
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden','true');
+  document.body.style.overflow = '';
+}
+(function initZoom_(){
+  const modal = document.getElementById('imgZoomModal');
+  const img = document.getElementById('zoomImg');
+  const backdrop = document.getElementById('zoomBackdrop');
+  const btnClose = document.getElementById('btnZoomClose');
+  const btnIn = document.getElementById('btnZoomIn');
+  const btnOut = document.getElementById('btnZoomOut');
+  const btnReset = document.getElementById('btnZoomReset');
+  const slider = document.getElementById('zoomSlider');
+  if(!modal || !img) return;
+  function setScale(v){
+    zoomScale = Math.min(3, Math.max(0.5, v));
+    // clamp pan saat zoom kecil
+    if(zoomScale <= 1){ zoomTx = 0; zoomTy = 0; }
+    applyZoomTransform_();
+  }
+  if(btnClose) btnClose.addEventListener('click', closeLampiranZoom_);
+  if(backdrop) backdrop.addEventListener('click', closeLampiranZoom_);
+  if(btnIn) btnIn.addEventListener('click', ()=> setScale(zoomScale + 0.2));
+  if(btnOut) btnOut.addEventListener('click', ()=> setScale(zoomScale - 0.2));
+  if(btnReset) btnReset.addEventListener('click', ()=> { zoomScale = 1; zoomTx = 0; zoomTy = 0; applyZoomTransform_(); });
+  if(slider) slider.addEventListener('input', (e)=> setScale(Number(e.target.value)));
+  // wheel zoom
+  modal.addEventListener('wheel', (e)=>{
+    if(!modal.classList.contains('open')) return;
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.08 : 0.08;
+    setScale(zoomScale + delta);
+  }, { passive:false });
+  // drag pan
+  img.addEventListener('pointerdown', (e)=>{
+    if(zoomScale <= 1) return;
+    isDraggingZoom = true;
+    img.setPointerCapture(e.pointerId);
+    img.classList.add('dragging');
+    dragStartX = e.clientX; dragStartY = e.clientY;
+    startTx = zoomTx; startTy = zoomTy;
+  });
+  img.addEventListener('pointermove', (e)=>{
+    if(!isDraggingZoom) return;
+    zoomTx = startTx + (e.clientX - dragStartX);
+    zoomTy = startTy + (e.clientY - dragStartY);
+    applyZoomTransform_();
+  });
+  function endDrag(e){
+    if(!isDraggingZoom) return;
+    isDraggingZoom = false;
+    img.classList.remove('dragging');
+    try{ img.releasePointerCapture(e.pointerId); }catch(_){}
+  }
+  img.addEventListener('pointerup', endDrag);
+  img.addEventListener('pointercancel', endDrag);
+  // keyboard ESC & +/- 
+  document.addEventListener('keydown', (e)=>{
+    if(!modal.classList.contains('open')) return;
+    if(e.key === 'Escape') closeLampiranZoom_();
+    if(e.key === '+' || e.key === '=') setScale(zoomScale + 0.15);
+    if(e.key === '-' || e.key === '_') setScale(zoomScale - 0.15);
+    if(e.key === '0') { zoomScale = 1; zoomTx = 0; zoomTy = 0; applyZoomTransform_(); }
+  });
+  // double click reset
+  img.addEventListener('dblclick', ()=> { zoomScale = zoomScale === 1 ? 1.8 : 1; zoomTx = 0; zoomTy = 0; applyZoomTransform_(); });
+})();
 
 /* ================= INIT ================= */
 updateLedger();

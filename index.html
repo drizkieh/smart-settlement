@@ -266,8 +266,11 @@
         <span class="save-status" id="caSaveStatus"></span>
       </div>
       <div class="load-existing">
-        <input id="loadNomorCa" placeholder="Buka CA yang sudah ada — masukkan Nomor CA">
+        <select id="loadNomorCa" style="flex:1;min-width:180px;background:var(--panel-2);border:1px solid var(--border);border-radius:7px;padding:11px;color:var(--text);font-family:var(--font-body);font-size:14px;outline:none;min-height:44px;">
+          <option value="">— Pilih / cari Nomor CA —</option>
+        </select>
         <button class="btn-secondary" id="btnLoadCa">Muat Data</button>
+        <button class="btn-secondary btn-small" id="btnRefreshCaDropdown" title="Refresh daftar CA">↻</button>
       </div>
     </div>
 
@@ -523,6 +526,7 @@ function enterApp(role){
   if(role === 'admin'){
     nav.innerHTML = `<button class="tab-btn" data-tab="input">Input Struk</button><button class="tab-btn" data-tab="report">Laporan</button>`;
     switchTab('input');
+    refreshCaDropdown_();
   }else{
     nav.innerHTML = `<button class="tab-btn" data-tab="dashboard">Dashboard</button><button class="tab-btn" data-tab="report">Laporan</button>`;
     switchTab('dashboard');
@@ -660,6 +664,12 @@ document.getElementById('btnSaveCaInfo').addEventListener('click', async ()=>{
     statusEl.textContent = '✓ Tersimpan ke Google Sheets'; statusEl.classList.add('ok');
     updateUploadLock();
     showToast('Info CA tersimpan');
+    // refresh dropdown agar CA baru langsung muncul & terpilih
+    try{
+      await refreshCaDropdown_();
+      const sel = document.getElementById('loadNomorCa');
+      if(sel) sel.value = caInfo.nomor;
+    }catch(_){}
   }catch(err){
     statusEl.textContent = '';
     showToast('Gagal menyimpan: ' + friendlyError(err), true);
@@ -668,9 +678,32 @@ document.getElementById('btnSaveCaInfo').addEventListener('click', async ()=>{
   }
 });
 
+async function refreshCaDropdown_(){
+  const sel = document.getElementById('loadNomorCa');
+  if(!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— Memuat daftar CA... —</option>';
+  try{
+    const list = await callBackend('getAllCa', {});
+    if(!list || !list.length){
+      sel.innerHTML = '<option value="">— Belum ada CA —</option>';
+      return;
+    }
+    // simpan posisi terpilih, tampilkan info biar gampang cari
+    sel.innerHTML = '<option value="">— Pilih Nomor CA —</option>' + list.map(ca => {
+      const label = ca.nomor + ' · ' + (ca.nama||'-') + ' · ' + (ca.dept||'-') + ' · ' + ca.status + ' · Sisa ' + formatRupiah(ca.sisa);
+      return '<option value="'+escapeHtml(ca.nomor)+'">'+escapeHtml(label)+'</option>';
+    }).join('');
+    if(prev) sel.value = prev;
+    // kalau value tidak ketemu (CA sudah dihapus), biarkan di placeholder
+  }catch(err){
+    sel.innerHTML = '<option value="">— Gagal memuat ('+escapeHtml(friendlyError(err))+') —</option>';
+  }
+}
+document.getElementById('btnRefreshCaDropdown').addEventListener('click', refreshCaDropdown_);
 document.getElementById('btnLoadCa').addEventListener('click', async ()=>{
   const nomor = document.getElementById('loadNomorCa').value.trim();
-  if(!nomor){ showToast('Isi Nomor CA yang mau dibuka', true); return; }
+  if(!nomor){ showToast('Pilih Nomor CA dulu', true); return; }
   const btn = document.getElementById('btnLoadCa');
   if(btn.disabled) return;
   btn.disabled = true;

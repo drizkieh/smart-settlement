@@ -198,8 +198,8 @@
   .lampiran-title{font-family:var(--font-display);font-size:13px;font-weight:600;margin-bottom:10px;}
   .lampiran-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
   @media(max-width:600px){.lampiran-grid{grid-template-columns:repeat(2,1fr);}}
-  .lampiran-item{border:1px solid var(--border);border-radius:8px;padding:6px;text-align:center;}
-  .lampiran-item img{width:100%;height:100px;object-fit:cover;border-radius:5px;margin-bottom:6px;background:var(--panel-2);}
+  .lampiran-item{border:1px solid var(--border);border-radius:8px;padding:6px;text-align:center;overflow:hidden;background:#fff;}
+  .lampiran-item img{width:100%;height:150px;object-fit:contain;background:#fff;padding:2px;border-radius:5px;margin-bottom:6px;display:block;}
   .lampiran-item .lnum{font-size:10px;color:var(--text-muted);font-weight:700;}
   .lampiran-item .ltotal{font-family:var(--font-mono);font-size:11px;font-weight:600;}
 
@@ -233,10 +233,12 @@
     .ledger-strip{position:static !important;top:auto !important;}
     .ledger-item .value, .entry-total, table.report-table td.num{color:#000 !important;}
     table.report-table th{color:#555 !important;}
-    .lampiran-item{break-inside:avoid;}
+    .lampiran-item{break-inside:avoid;break-inside:avoid-column;page-break-inside:avoid;}
+    .lampiran-grid{grid-template-columns:repeat(3,1fr) !important;gap:10px !important;}
+    .lampiran-item img{height:165px !important;object-fit:contain !important;background:#fff !important;}
     tr{break-inside:avoid;}
     .table-scroll{overflow:visible;}
-    @page{margin:14mm;}
+    @page{margin:12mm;}
   }
 </style>
 </head>
@@ -334,7 +336,7 @@
   <section id="tab-report" class="tab-panel">
     <div class="report-actions no-print">
       <button class="btn-secondary" id="btnBackFromReport">← Kembali</button>
-      <button class="btn-primary" onclick="window.print()">🖨️ Cetak Laporan</button>
+      <button class="btn-primary" id="btnPrintReport">🖨️ Cetak Laporan</button>
     </div>
 
     <div class="card" id="reportContent">
@@ -1251,6 +1253,31 @@ function closeLampiranZoom_(){
   // double click reset
   img.addEventListener('dblclick', ()=> { zoomScale = zoomScale === 1 ? 1.8 : 1; zoomTx = 0; zoomTy = 0; applyZoomTransform_(); });
 })();
+
+// Print handler: hydrate dulu baru print agar gambar tidak broken
+document.getElementById('btnPrintReport')?.addEventListener('click', async ()=>{
+  const btn = document.getElementById('btnPrintReport');
+  const orig = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = 'Menyiapkan...'; }
+  try{
+    // pastikan report dirender & gambar private sudah di-fetch
+    renderReport();
+    await hydrateReceiptImages_(document.getElementById('reportContent'));
+    // tunggu decode gambar selesai (max 2s)
+    const imgs = Array.from(document.querySelectorAll('#lampiranGrid img[data-file-id]'));
+    await Promise.all(imgs.map(im => {
+      if(im.complete && im.naturalWidth) return Promise.resolve();
+      return new Promise(res => {
+        let done=false; const finish=()=>{ if(!done){done=true; res();} };
+        im.addEventListener('load', finish, {once:true});
+        im.addEventListener('error', finish, {once:true});
+        setTimeout(finish, 2500);
+      });
+    }));
+  }catch(e){ console.warn('print hydrate gagal', e); }
+  if(btn){ btn.disabled = false; btn.textContent = orig || '🖨️ Cetak Laporan'; }
+  setTimeout(()=> window.print(), 120);
+});
 
 /* ================= INIT ================= */
 updateLedger();

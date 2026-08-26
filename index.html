@@ -784,6 +784,9 @@ document.getElementById('btnLoadCa').addEventListener('click', async ()=>{
   const btn = document.getElementById('btnLoadCa');
   if(btn.disabled) return;
   btn.disabled = true;
+  const origBtnLabel = btn.textContent;
+  btn.textContent = '⏳ Memuat...';
+  showToast('Memuat data ' + nomor + '...', false);
   try{
     const data = await callBackend('getCaData', { nomorCa: nomor });
     caInfo = { nomor: data.header.nomor, nama: data.header.nama, dept: data.header.dept, jumlah: Number(data.header.jumlah)||0, status: data.header.status || 'Draft' };
@@ -808,11 +811,33 @@ document.getElementById('btnLoadCa').addEventListener('click', async ()=>{
     // juga untuk laporan jika sedang terbuka
     hydrateReceiptImages_(document.getElementById('reportContent'));
     clearLocalDraft_();
-    showToast('Data CA ' + nomor + ' dimuat');
+    // notifikasi kaya info: jumlah struk + terpakai/sisa + warning kurang bayar
+    (function notifyLoad_(){
+      const terpakai = entries.reduce((s,e)=>s+(Number(e.total)||0),0);
+      const sisa = caInfo.jumlah - terpakai;
+      const n = entries.length;
+      if(sisa < 0){
+        showToast('⚠ ' + caInfo.nomor + ' dimuat · ' + n + ' struk — KURANG BAYAR ' + formatRupiah(Math.abs(sisa)), true);
+      }else{
+        showToast('✓ ' + caInfo.nomor + ' dimuat · ' + n + ' struk · Terpakai ' + formatRupiah(terpakai) + ' · Sisa ' + formatRupiah(sisa));
+      }
+      // sinkron label dropdown tanpa panggil getAllCa ulang
+      try{
+        const sel = document.getElementById('loadNomorCa');
+        if(sel){
+          const opt = sel.querySelector('option[value="' + CSS.escape(caInfo.nomor) + '"]');
+          if(opt){
+            const label = caInfo.nomor + ' · ' + (caInfo.nama||'-') + ' · ' + (caInfo.dept||'-') + ' · ' + caInfo.status + ' · Sisa ' + formatRupiah(sisa);
+            opt.textContent = label;
+          }
+        }
+      }catch(_){}
+    })();
   }catch(err){
     showToast('Gagal memuat: ' + friendlyError(err), true);
   }finally{
     btn.disabled = false;
+    btn.textContent = origBtnLabel || 'Muat Data';
   }
 });
 
